@@ -8,7 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -93,7 +93,6 @@ func main() {
 	}
 
 	logger := logging.GetLogger()
-	defer logger.Close()
 	logging.Info("Emed started in directory: %s", workingDir)
 
 	userConfig := config.LoadUserConfig()
@@ -128,28 +127,56 @@ func main() {
 		os.Exit(0)
 	}()
 
-	defer func() {
-		if r := recover(); r != nil {
-			layout.Stop()
-			restoreTerminalState(app)
-			fmt.Printf("Application error: %v\n", r)
-			buf := make([]byte, 4096)
-			n := runtime.Stack(buf, false)
-			fmt.Printf("Stack trace:\n%s\n", buf[:n])
-		}
-	}()
-
 	enablePaste := shouldEnableTerminalPaste()
 	logging.Info("terminal paste capture enabled: %t", enablePaste)
 
-	if err := app.SetRoot(layout.GetRoot(), true).EnableMouse(true).EnablePaste(enablePaste).Run(); err != nil {
-		layout.Stop()
-		restoreTerminalState(app)
-		panic(err)
+	code := runApp(
+		func() error {
+			return app.SetRoot(layout.GetRoot(), true).EnableMouse(true).EnablePaste(enablePaste).Run()
+		},
+		func(stopApp bool) {
+			layout.Stop()
+			if stopApp {
+				restoreTerminalState(app)
+			} else {
+				restoreTerminalState(nil)
+			}
+		},
+		os.Stderr,
+		logging.Error,
+	)
+	logger.Close()
+	if code != 0 {
+		os.Exit(code)
+	}
+}
+
+// runApp runs the UI loop and returns the process exit code. cleanup runs
+// once in every case. A returned error is reported as a one line message; only
+// a real panic prints its stack trace, which is also logged.
+//
+// cleanup gets stopApp=false when run returned an error: tview keeps the
+// screen it failed to initialise, and stopping the application then panics.
+func runApp(run func() error, cleanup func(stopApp bool), stderr io.Writer, logError func(format string, args ...interface{})) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			cleanup(true)
+			stack := debug.Stack()
+			logError("application panic: %v\n%s", r, stack)
+			fmt.Fprintf(stderr, "Application error: %v\nStack trace:\n%s\n", r, stack)
+			code = 1
+		}
+	}()
+
+	if err := run(); err != nil {
+		cleanup(false)
+		logError("application failed to run: %v", err)
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
 	}
 
-	layout.Stop()
-	restoreTerminalState(app)
+	cleanup(true)
+	return 0
 }
 
 func restoreTerminalState(app *tview.Application) {

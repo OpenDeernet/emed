@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestParseCLIArgs(t *testing.T) {
 	tests := []struct {
@@ -151,6 +157,79 @@ func TestShouldEnableTerminalPaste(t *testing.T) {
 			got := shouldEnableTerminalPaste()
 			if got != tc.want {
 				t.Fatalf("unexpected result: got %t want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunApp(t *testing.T) {
+	tests := []struct {
+		name      string
+		run       func() error
+		wantCode  int
+		wantOut   string
+		wantStack bool
+		wantStop  bool
+	}{
+		{
+			name:     "clean exit",
+			run:      func() error { return nil },
+			wantCode: 0,
+			wantStop: true,
+		},
+		{
+			name:     "run error",
+			run:      func() error { return errors.New("terminal not available") },
+			wantCode: 1,
+			wantOut:  "Error: terminal not available\n",
+		},
+		{
+			name:      "panic",
+			run:       func() error { panic("boom") },
+			wantCode:  1,
+			wantStack: true,
+			wantStop:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			var logged []string
+			cleanups := 0
+			var stopApp bool
+
+			code := runApp(tc.run, func(stop bool) { cleanups++; stopApp = stop }, &stderr, func(format string, args ...interface{}) {
+				logged = append(logged, fmt.Sprintf(format, args...))
+			})
+
+			if code != tc.wantCode {
+				t.Errorf("exit code: got %d want %d", code, tc.wantCode)
+			}
+			if cleanups != 1 {
+				t.Errorf("cleanup calls: got %d want 1", cleanups)
+			}
+			if stopApp != tc.wantStop {
+				t.Errorf("stopApp: got %t want %t", stopApp, tc.wantStop)
+			}
+			out := stderr.String()
+			if tc.wantStack {
+				if !strings.HasPrefix(out, "Application error: boom\nStack trace:\n") || !strings.Contains(out, "goroutine") {
+					t.Errorf("stderr should hold the panic and its stack trace, got %q", out)
+				}
+				if len(logged) != 1 || !strings.Contains(logged[0], "goroutine") {
+					t.Errorf("stack trace should be logged, got %q", logged)
+				}
+				return
+			}
+			if out != tc.wantOut {
+				t.Errorf("stderr: got %q want %q", out, tc.wantOut)
+			}
+			if strings.Contains(strings.Join(logged, "\n"), "goroutine") {
+				t.Errorf("no stack trace expected in the log, got %q", logged)
+			}
+			if tc.wantCode != 0 && len(logged) != 1 {
+				t.Errorf("error should be logged once, got %q", logged)
 			}
 		})
 	}
